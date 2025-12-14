@@ -3,7 +3,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 import numpy as np
 from scipy.stats import norm
-from typing import Dict, Tuple, List
+from typing import Dict, List
 import sys
 import os
 import json
@@ -73,7 +73,7 @@ def fetch_nws_forecast(city: str) -> float:
         logger.error(f"NWS error for {city}: {e}")
         return 76.0 if city == 'Miami' else 32.0
 
-def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], (float, str)]:
+def fetch_kalshi_markets(series_ticker: str) -> Dict:
     url = f"{PUBLIC_KALSHI_BASE}/markets?series_ticker={series_ticker}&status=open&limit=100"
     try:
         resp = requests.get(url, timeout=15).json()
@@ -155,14 +155,16 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     except Exception as e:
         logger.error(f"Order exception: {e}")
 
-def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], (float, str)], accuracy: float, city: str) -> List[dict]:
+def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str) -> List[dict]:
     base_threshold = 0.055 / accuracy
     no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
     cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
     
     edges = []
     
-    for (low, high), (market_yes_p, ticker) in market_probs.items():
+    for key, value in market_probs.items():
+        low, high = key
+        market_yes_p, ticker = value
         if market_yes_p <= 0.01 or market_yes_p >= 0.99:
             continue
         
