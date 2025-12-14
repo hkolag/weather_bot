@@ -60,16 +60,17 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Log market titles to confirm which day's markets are being used
-        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%b %d").lower()
-        logger.info(f"Found {len(markets)} open markets for {series_ticker}:")
-        for m in markets:
-            title = m.get('title', '').lower()
-            event_ticker = m.get('event_ticker', '')
-            logger.info(f" - {event_ticker}: {title}")
+        # Filter to tomorrow's event only (e.g., -25DEC15)
+        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%d%b%y").upper()  # e.g., 15DEC25
+        tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
+        
+        logger.info(f"Found {len(tomorrow_markets)} markets for tomorrow ({tomorrow_str}) out of {len(markets)} open")
+        if not tomorrow_markets:
+            logger.warning("No tomorrow's markets found — falling back to all open")
+            tomorrow_markets = markets
         
         probs = {}
-        for market in markets:
+        for market in tomorrow_markets:
             subtitle = market.get('subtitle', '').replace('°F', '').replace('°', '').strip()
             yes_bid = market.get('yes_bid', 0) / 100.0
             if not subtitle:
@@ -90,7 +91,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
                 high = float(high_str) + 1
                 probs[(-100.0, high)] = yes_bid
         
-        logger.info(f"Parsed {len(probs)} price bins from open markets")
+        logger.info(f"Parsed {len(probs)} price bins for tomorrow's market")
         return probs
     except Exception as e:
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
