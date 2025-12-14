@@ -82,7 +82,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event
+        # Filter to tomorrow's event (25DEC15 format)
         tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
