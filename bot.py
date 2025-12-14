@@ -8,6 +8,7 @@ import sys
 import os
 import json
 import base64
+import time
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -30,8 +31,8 @@ SERIES_TICKERS = {'Miami': 'KXHIGHMIA', 'NYC': 'KXHIGHNY'}
 SIGMAS = {'Miami': 1.4, 'NYC': 1.6}
 ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 
-PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'  # Public data
-TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'  # Updated trading endpoint
+PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
@@ -120,7 +121,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
 def sign_payload(payload: dict) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
     payload_str = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-    message = f"POST\n/orders\n{payload_str}"
+    message = f"POST\n/portfolio/orders\n{payload_str}"
     signature = private_key.sign(
         message.encode(),
         padding.PSS(
@@ -136,21 +137,32 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
         logger.info(f"AUTO-TRADING OFF — would place: {contracts} {side} on {ticker} @ {price_cents}¢")
         return
     
+    timestamp = int(time.time() * 1000)  # Unix ms
     payload = {
         "ticker": ticker,
         "side": side,
+        "action": "buy",
         "count": contracts,
         "type": "limit",
-        "price": price_cents,
-        "client_order_id": f"bot-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        "client_order_id": f"bot-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "no_price": price_cents if side == "no" else None,
+        "yes_price": price_cents if side == "yes" else None
     }
+    if side == "yes":
+        payload["yes_price"] = price_cents
+        del payload["no_price"]
+    else:
+        payload["no_price"] = price_cents
+        del payload["yes_price"]
+    
     signature = sign_payload(payload)
     headers = {
         "Authorization": f"Key {KALSHI_API_KEY_ID}",
         "X-Signature": signature,
+        "KALSHI-ACCESS-TIMESTAMP": str(timestamp),
         "Content-Type": "application/json"
     }
-    url = f"{TRADING_KALSHI_BASE}/orders"
+    url = f"{TRADING_KALSHI_BASE}/portfolio/orders"
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code == 200:
