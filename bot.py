@@ -14,79 +14,158 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Verified NWS point URLs (official grid for Central Park NYC and Miami Airport)
+# Verified NWS grid forecast URLs (direct, reliable)
 NWS_FORECAST_URLS = {
-    'Miami': 'https://api.weather.gov/gridpoints/MFL/109,69/forecast',  # Miami
-    'NYC': 'https://api.weather.gov/gridpoints/OKX/33,35/forecast'      # Central Park area
+    'Miami': 'https://api.weather.gov/gridpoints/MFL/109,69/forecast',
+    'NYC': 'https://api.weather.gov/gridpoints/OKX/33,35/forecast'
 }
 
 CITIES = ['Miami', 'NYC']
-SERIES_TICKERS = {'Miami': 'KXHIGHMIA', 'NYC': 'KXHIGHNY'}  # Confirmed from Kalshi data
+SERIES_TICKERS = {'Miami': 'KXHIGHMIA', 'NYC': 'KXHIGHNY'}
 SIGMAS = {'Miami': 1.4, 'NYC': 1.6}
 ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 BANKROLL = 50.0
-MAX_RISK_PER_TRADE_PCT = 0.04
+MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
 def fetch_nws_forecast(city: str) -> float:
     url = NWS_FORECAST_URLS[city]
-    headers = {'User-Agent': 'KalshiBot/1.0 (contact@example.com)'}
+    headers = {'User-Agent': 'KalshiWeatherBot/1.0 (contact@example.com)'}
     try:
-        resp = requests.get(url, headers=headers, timeout=10).json()
+        resp = requests.get(url, headers=headers, timeout=15).json()
         periods = resp['properties']['periods']
         tomorrow = (datetime.utcnow() + timedelta(days=1)).date()
         for period in periods:
-            start = datetime.fromisoformat(period['startTime'].rstrip('Z') + '+00:00')
+            start_str = period['startTime'].replace('Z', '+00:00')
+            start = datetime.fromisoformat(start_str)
             if period['isDaytime'] and start.date() == tomorrow:
                 mu = float(period['temperature'])
-                logger.info(f"{city} NWS high forecast: {mu}°F")
+                logger.info(f"{city} NWS high forecast tomorrow: {mu}°F")
                 return mu
-        logger.warning(f"No tomorrow daytime forecast for {city}")
-        return 78.0 if city == 'Miami' else 32.0  # Current winter defaults
+        logger.warning(f"No tomorrow daytime period found for {city}")
+        return 76.0 if city == 'Miami' else 32.0
     except Exception as e:
         logger.error(f"NWS error for {city}: {e}")
-        return 78.0 if city == 'Miami' else 32.0
+        return 76.0 if city == 'Miami' else 32.0
 
 def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]:
     url = f"{PUBLIC_KALSHI_BASE}/markets?series_ticker={series_ticker}&status=open&limit=100"
     try:
-        resp = requests.get(url, timeout=10).json()
+        resp = requests.get(url, timeout=15).json()
         markets = resp.get('markets', [])
         if not markets:
-            logger.warning(f"No open markets for {series_ticker}")
+            logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
         probs = {}
         for market in markets:
-            subtitle = market.get('subtitle', '').replace('°F', '').replace('°', '').strip().lower()
+            subtitle = market.get('subtitle', '').replace('°F', '').replace('°', '').strip()
             yes_bid = market.get('yes_bid', 0) / 100.0
             if not subtitle:
                 continue
             
-            if 'to' in subtitle:
-                parts = subtitle.split('to')
+            subtitle_lower = subtitle.lower()
+            if ' to ' in subtitle_lower:
+                parts = subtitle_lower.split(' to ')
                 low = float(parts[0].strip())
                 high = float(parts[1].strip()) + 1
                 probs[(low, high)] = yes_bid
-            elif 'or above' in subtitle:
-                low = float(subtitle.split('or above')[0].strip())
-                probs[(low, 200)] = yes_bid
-            elif 'or below' in subtitle:
-                high = float(subtitle.split('or below')[0].strip()) + 1
-                probs[( -50, high )] = yes_bid  # Arbitrary low
+            elif 'or above' in subtitle_lower:
+                low_str = subtitle_lower.split('or above')[0].strip()
+                low = float(low_str)
+                probs[(low, 200.0)] = yes_bid
+            elif 'or below' in subtitle_lower:
+                high_str = subtitle_lower.split('or below')[0].strip()
+                high = float(high_str) + 1
+                probs[(-50.0, high)] = yes_bid
         
-        logger.info(f"Fetched {len(probs)} bins for {series_ticker}")
+        logger.info(f"Fetched {len(probs)} price bins for {series_ticker}")
         return probs
     except Exception as e:
-        logger.error(f"Kalshi error for {series_ticker}: {e}")
+        logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
-# compute_edges and main same as previous full script (copy them here)
+def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float) -> List[dict]:
+    threshold = 0.055 / accuracy  # ~4.5% Miami, ~5.5% NYC
+    edges = []
+    
+    for (low, high), market_yes_p in market_probs.items():
+        model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
+        market_no_p = 1 - market_yes_p
+        model_no_p = 1 - model_yes_p
+        
+        diff_no = model_no_p - market_no_p
+        diff_yes = model_yes_p - market_yes_p
+        
+        action = None
+        edge_val = 0.0
+        price = 0.0
+        
+        # Prioritize Buy No on upper tails
+        if low > mu + sigma and diff_no > threshold + 0.01:
+            action = "Buy No"
+            edge_val = diff_no
+            price = market_no_p
+        elif diff_yes > threshold + 0.02:  # Rare strong Yes opportunity
+            action = "Buy Yes"
+            edge_val = diff_yes
+            price = market_yes_p
+        
+        if action:
+            kelly = edge_val ** 2 / (price if action == "Buy Yes" else (1 - price))
+            risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
+            contracts = max(1, int(risk / price)) if price > 0 else 0
+            
+            bin_str = (f"{int(low)}-{int(high-1)}°F" if high < 200 and low > -50 
+                       else f">={int(low)}°F" if high == 200 
+                       else f"<={int(high-1)}°F")
+            
+            edges.append({
+                'Bin': bin_str,
+                'Action': action,
+                'Edge': round(edge_val * 100, 1),
+                'Price': round(price * 100),
+                'Risk': round(risk, 2),
+                'Contracts': contracts
+            })
+    
+    edges.sort(key=lambda x: x['Edge'], reverse=True)
+    return edges[:MAX_TRADES_PER_CITY]
 
-# ... (keep the same compute_edges and main functions from the last version I gave)
+def main():
+    logger.info("=== Kalshi High Temp Bot Started ===")
+    total_risk = 0.0
+    trade_count = 0
+    
+    for city in CITIES:
+        series = SERIES_TICKERS[city]
+        logger.info(f"Processing {city} high temp...")
+        mu = fetch_nws_forecast(city)
+        sigma = SIGMAS[city]
+        market_probs = fetch_kalshi_markets(series)
+        
+        if not market_probs:
+            logger.info(f"No market data available for {city} – skipping")
+            continue
+        
+        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city])
+        
+        for edge in edges:
+            entry = (f"{city} High | {edge['Bin']} | {edge['Action']} @ {edge['Price']}¢ | "
+                     f"Edge: {edge['Edge']}% | Risk: ${edge['Risk']} | Contracts: {edge['Contracts']}")
+            logger.info(entry)
+            total_risk += edge['Risk']
+            trade_count += 1
+    
+    if trade_count > 0:
+        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f}")
+    else:
+        logger.info("No high-conviction edges found today – standing down.")
+    
+    logger.info("=== Bot Run Ended ===\n")
 
 if __name__ == "__main__":
     main()
