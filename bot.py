@@ -60,14 +60,14 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event only (e.g., -25DEC15)
-        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%d%b%y").upper()  # e.g., 15DEC25
+        # Filter to tomorrow's event (format: 25DEC15 for Dec 15, 2025)
+        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()  # e.g., 25DEC15
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
         logger.info(f"Found {len(tomorrow_markets)} markets for tomorrow ({tomorrow_str}) out of {len(markets)} open")
         if not tomorrow_markets:
-            logger.warning("No tomorrow's markets found — falling back to all open")
-            tomorrow_markets = markets
+            logger.warning("No tomorrow's markets found — check if markets are open yet")
+            return {}
         
         probs = {}
         for market in tomorrow_markets:
@@ -99,8 +99,8 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
 
 def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float, city: str) -> List[dict]:
     base_threshold = 0.055 / accuracy
-    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # 4% for NYC No
-    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0  # Winter cold tail boost
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
+    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
     
     edges = []
     
