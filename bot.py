@@ -9,8 +9,7 @@ import os
 import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+from cryptography.hazmat.primitives.asymmetric import padding
 
 # Console logging for Render
 logging.basicConfig(
@@ -82,7 +81,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event (25DEC15 format)
+        # Filter to tomorrow's event
         tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
@@ -122,7 +121,14 @@ def sign_payload(payload: dict) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
     payload_str = json.dumps(payload, separators=(',', ':'), sort_keys=True)
     message = f"POST\n/orders\n{payload_str}"
-    signature = private_key.sign(message.encode(), ec.ECDSA(Prehashed(hashes.SHA256())))
+    signature = private_key.sign(
+        message.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
     return base64.b64encode(signature).decode()
 
 def place_order(ticker: str, side: str, contracts: int, price_cents: int):
