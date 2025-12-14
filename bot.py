@@ -8,7 +8,6 @@ import sys
 import os
 import json
 import base64
-import time
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -118,10 +117,9 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
-def sign_payload(payload: dict) -> str:
+def sign_payload(timestamp: str, payload_str: str) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    payload_str = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-    message = f"POST\n/portfolio/orders\n{payload_str}"
+    message = f"POST\n/portfolio/orders\n{timestamp}\n{payload_str}"
     signature = private_key.sign(
         message.encode(),
         padding.PSS(
@@ -137,29 +135,27 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
         logger.info(f"AUTO-TRADING OFF — would place: {contracts} {side} on {ticker} @ {price_cents}¢")
         return
     
-    timestamp = int(time.time() * 1000)  # Unix ms
+    timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     payload = {
         "ticker": ticker,
         "side": side,
         "action": "buy",
         "count": contracts,
         "type": "limit",
-        "client_order_id": f"bot-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-        "no_price": price_cents if side == "no" else None,
-        "yes_price": price_cents if side == "yes" else None
+        "client_order_id": f"bot-{timestamp}",
     }
     if side == "yes":
         payload["yes_price"] = price_cents
-        del payload["no_price"]
     else:
         payload["no_price"] = price_cents
-        del payload["yes_price"]
     
-    signature = sign_payload(payload)
+    payload_str = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+    signature = sign_payload(timestamp, payload_str)
+    
     headers = {
-        "Authorization": f"Key {KALSHI_API_KEY_ID}",
-        "X-Signature": signature,
-        "KALSHI-ACCESS-TIMESTAMP": str(timestamp),
+        "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
         "Content-Type": "application/json"
     }
     url = f"{TRADING_KALSHI_BASE}/portfolio/orders"
