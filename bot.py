@@ -6,6 +6,7 @@ from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
+import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -36,7 +37,7 @@ BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
-# Triggers
+# Triggers (set in Render Environment Variables)
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
 ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
 KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
@@ -167,7 +168,103 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     except Exception as e:
         logger.error(f"Order exception: {e}")
 
-# compute_edges and main (same as previous final version)
+def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str) -> List[dict]:
+    base_threshold = 0.055 / accuracy
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
+    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
+    
+    edges = []
+    
+    for key, value in market_probs.items():
+        low, high = key
+        market_yes_p, ticker = value
+        if market_yes_p <= 0.01 or market_yes_p >= 0.99:
+            continue
+        
+        model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
+        market_no_p = 1 - market_yes_p
+        model_no_p = 1 - model_yes_p
+        
+        diff_no = model_no_p - market_no_p
+        
+        action = None
+        edge_val = 0.0
+        price = 0.0
+        
+        if diff_no > no_threshold - cold_boost:
+            action = "Buy No"
+            edge_val = diff_no
+            price = market_no_p
+        elif ENABLE_YES_BUYS and model_yes_p - market_yes_p > base_threshold + 0.05:
+            action = "Buy Yes"
+            edge_val = model_yes_p - market_yes_p
+            price = market_yes_p
+        
+        if action:
+            denominator = price if action == "Buy Yes" else (1 - price)
+            if denominator == 0:
+                continue
+            kelly = edge_val ** 2 / denominator
+            risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
+            contracts = max(1, int(risk / price)) if price > 0 else 0
+            
+            potential_profit = contracts * (1 - price) if action == "Buy No" else contracts * (1 - price)
+            
+            bin_str = f">={int(low)}°F" if high >= 200 else f"<={int(high-1)}°F" if low <= -100 else f"{int(low)}-{int(high-1)}°F"
+            
+            edges.append({
+                'Bin': bin_str,
+                'Action': action,
+                'Edge': round(edge_val * 100, 1),
+                'Price': round(price * 100),
+                'Risk': round(risk, 2),
+                'Contracts': contracts,
+                'PotentialProfit': round(potential_profit, 2),
+                'Ticker': ticker
+            })
+    
+    edges.sort(key=lambda x: x['Edge'], reverse=True)
+    return edges[:MAX_TRADES_PER_CITY]
+
+def main():
+    logger.info("=== Kalshi High Temp Bot Started ===")
+    logger.info(f"ENABLE_YES_BUYS: {ENABLE_YES_BUYS} | ENABLE_AUTO_TRADING: {ENABLE_AUTO_TRADING}")
+    total_risk = 0.0
+    total_potential_profit = 0.0
+    trade_count = 0
+    
+    for city in CITIES:
+        series = SERIES_TICKERS[city]
+        logger.info(f"Processing {city} high temp...")
+        mu = fetch_nws_forecast(city)
+        sigma = SIGMAS[city]
+        market_probs = fetch_kalshi_markets(series)
+        
+        if not market_probs:
+            logger.info(f"No market data available for {city} – skipping")
+            continue
+        
+        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city], city)
+        
+        for edge in edges:
+            entry = (f"{city} High | {edge['Bin']} | {edge['Action']} @ {edge['Price']}¢ | "
+                     f"Edge: {edge['Edge']}% | Risk: ${edge['Risk']} | Contracts: {edge['Contracts']}")
+            logger.info(entry)
+            total_risk += edge['Risk']
+            total_potential_profit += edge['PotentialProfit']
+            trade_count += 1
+            
+            # Real auto-trading
+            if edge['Ticker']:
+                side = "no" if edge['Action'] == "Buy No" else "yes"
+                place_order(edge['Ticker'], side, edge['Contracts'], edge['Price'])
+    
+    if trade_count > 0:
+        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | Total potential profit: ${total_potential_profit:.2f} (if all win)")
+    else:
+        logger.info("No high-conviction edges found today – standing down.")
+    
+    logger.info("=== Bot Run Ended ===\n")
 
 if __name__ == "__main__":
     main()
