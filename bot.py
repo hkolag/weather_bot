@@ -1,6 +1,6 @@
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import numpy as np
 from scipy.stats import norm
 from typing import Dict, Tuple, List
@@ -14,7 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Verified NWS grid forecast URLs (direct, reliable)
+# Verified NWS grid forecast URLs
 NWS_FORECAST_URLS = {
     'Miami': 'https://api.weather.gov/gridpoints/MFL/109,69/forecast',
     'NYC': 'https://api.weather.gov/gridpoints/OKX/33,35/forecast'
@@ -37,7 +37,7 @@ def fetch_nws_forecast(city: str) -> float:
     try:
         resp = requests.get(url, headers=headers, timeout=15).json()
         periods = resp['properties']['periods']
-        tomorrow = (datetime.utcnow() + timedelta(days=1)).date()
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date()
         for period in periods:
             start_str = period['startTime'].replace('Z', '+00:00')
             start = datetime.fromisoformat(start_str)
@@ -80,7 +80,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             elif 'or below' in subtitle_lower:
                 high_str = subtitle_lower.split('or below')[0].strip()
                 high = float(high_str) + 1
-                probs[(-50.0, high)] = yes_bid
+                probs[(-100.0, high)] = yes_bid  # Wider low for cold tails
         
         logger.info(f"Fetched {len(probs)} price bins for {series_ticker}")
         return probs
@@ -93,6 +93,9 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
     edges = []
     
     for (low, high), market_yes_p in market_probs.items():
+        if market_yes_p >= 0.99 or market_yes_p <= 0.01:
+            continue  # Skip truly illiquid/near-certain bins (protects from 0¢/99¢ issues)
+        
         model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
         market_no_p = 1 - market_yes_p
         model_no_p = 1 - model_yes_p
@@ -104,24 +107,28 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         edge_val = 0.0
         price = 0.0
         
-        # Prioritize Buy No on upper tails
-        if low > mu + sigma and diff_no > threshold + 0.01:
+        # Prioritize Buy No on any overpriced tail (cold or hot)
+        if abs(diff_no) > abs(diff_yes) and diff_no > threshold:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        elif diff_yes > threshold + 0.02:  # Rare strong Yes opportunity
+        elif diff_yes > threshold + 0.02:  # Strong Yes on undervalued core/shoulder
             action = "Buy Yes"
             edge_val = diff_yes
             price = market_yes_p
         
         if action:
-            kelly = edge_val ** 2 / (price if action == "Buy Yes" else (1 - price))
+            denominator = price if action == "Buy Yes" else (1 - price)
+            kelly = edge_val ** 2 / denominator
             risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
             contracts = max(1, int(risk / price)) if price > 0 else 0
             
-            bin_str = (f"{int(low)}-{int(high-1)}°F" if high < 200 and low > -50 
-                       else f">={int(low)}°F" if high == 200 
-                       else f"<={int(high-1)}°F")
+            if high >= 200:
+                bin_str = f">={int(low)}°F"
+            elif low <= -100:
+                bin_str = f"<={int(high-1)}°F"
+            else:
+                bin_str = f"{int(low)}-{int(high-1)}°F"
             
             edges.append({
                 'Bin': bin_str,
