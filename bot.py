@@ -6,6 +6,11 @@ from scipy.stats import norm
 from typing import Dict, Tuple, List
 import sys
 import os
+import json
+import base64
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 
 # Console logging for Render
 logging.basicConfig(
@@ -27,18 +32,24 @@ SIGMAS = {'Miami': 1.4, 'NYC': 1.6}
 ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
+TRADING_KALSHI_BASE = 'https://trading-api.kalshi.com/trade-api/v2'
 
 BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
-# Triggers (off by default)
+# Triggers
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
 ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
-KALSHI_TRADING_API_KEY = os.getenv('KALSHI_TRADING_API_KEY')  # For future auto-trading if needed
+KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
+KALSHI_PRIVATE_KEY_PEM = os.getenv('KALSHI_PRIVATE_KEY_PEM')
 
 if ENABLE_AUTO_TRADING:
-    logger.info("Auto-trading is ENABLED (placeholder — real trading not implemented yet)")
+    if not KALSHI_API_KEY_ID or not KALSHI_PRIVATE_KEY_PEM:
+        logger.warning("Auto-trading enabled but missing API credentials — falling back to logging only")
+        ENABLE_AUTO_TRADING = False
+    else:
+        logger.info("Auto-trading is ENABLED — real orders will be placed")
 else:
     logger.info("Auto-trading is OFF — recommendations only")
 
@@ -62,7 +73,7 @@ def fetch_nws_forecast(city: str) -> float:
         logger.error(f"NWS error for {city}: {e}")
         return 76.0 if city == 'Miami' else 32.0
 
-def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]:
+def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], (float, str)]:
     url = f"{PUBLIC_KALSHI_BASE}/markets?series_ticker={series_ticker}&status=open&limit=100"
     try:
         resp = requests.get(url, timeout=15).json()
@@ -71,20 +82,21 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event (e.g., 25DEC15)
+        # Filter to tomorrow's event
         tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
         logger.info(f"Found {len(tomorrow_markets)} markets for tomorrow ({tomorrow_str}) out of {len(markets)} open")
         if not tomorrow_markets:
-            logger.warning("No tomorrow's markets found — falling back to all open")
-            tomorrow_markets = markets
+            logger.warning("No tomorrow's markets found")
+            return {}
         
         probs = {}
         for market in tomorrow_markets:
             subtitle = market.get('subtitle', '').replace('°F', '').replace('°', '').strip()
             yes_bid = market.get('yes_bid', 0) / 100.0
-            if not subtitle:
+            ticker = market.get('ticker', '')
+            if not subtitle or not ticker:
                 continue
             
             subtitle_lower = subtitle.lower()
@@ -92,15 +104,13 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
                 parts = subtitle_lower.split(' to ')
                 low = float(parts[0].strip())
                 high = float(parts[1].strip()) + 1
-                probs[(low, high)] = yes_bid
+                probs[(low, high)] = (yes_bid, ticker)
             elif 'or above' in subtitle_lower:
-                low_str = subtitle_lower.split('or above')[0].strip()
-                low = float(low_str)
-                probs[(low, 200.0)] = yes_bid
+                low = float(subtitle_lower.split('or above')[0].strip())
+                probs[(low, 200.0)] = (yes_bid, ticker)
             elif 'or below' in subtitle_lower:
-                high_str = subtitle_lower.split('or below')[0].strip()
-                high = float(high_str) + 1
-                probs[(-100.0, high)] = yes_bid
+                high = float(subtitle_lower.split('or below')[0].strip()) + 1
+                probs[(-100.0, high)] = (yes_bid, ticker)
         
         logger.info(f"Parsed {len(probs)} price bins for tomorrow's market")
         return probs
@@ -108,14 +118,51 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
-def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float, city: str) -> List[dict]:
+def sign_payload(payload: dict) -> str:
+    private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
+    payload_str = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+    message = f"POST\n/orders\n{payload_str}"
+    signature = private_key.sign(message.encode(), ec.ECDSA(Prehashed(hashes.SHA256())))
+    return base64.b64encode(signature).decode()
+
+def place_order(ticker: str, side: str, contracts: int, price_cents: int):
+    if not ENABLE_AUTO_TRADING:
+        logger.info(f"AUTO-TRADING OFF — would place: {contracts} {side} on {ticker} @ {price_cents}¢")
+        return
+    
+    payload = {
+        "ticker": ticker,
+        "side": side,
+        "count": contracts,
+        "type": "limit",
+        "price": price_cents,
+        "client_order_id": f"bot-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    }
+    signature = sign_payload(payload)
+    headers = {
+        "Authorization": f"Key {KALSHI_API_KEY_ID}",
+        "X-Signature": signature,
+        "Content-Type": "application/json"
+    }
+    url = f"{TRADING_KALSHI_BASE}/orders"
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            order = resp.json().get('order', {})
+            logger.info(f"SUCCESS: Placed {contracts} {side} on {ticker} @ {price_cents}¢ | Order ID: {order.get('order_id')}")
+        else:
+            logger.error(f"Order failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        logger.error(f"Order exception: {e}")
+
+def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], (float, str)], accuracy: float, city: str) -> List[dict]:
     base_threshold = 0.055 / accuracy
-    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # NYC more aggressive on No
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
     cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
     
     edges = []
     
-    for (low, high), market_yes_p in market_probs.items():
+    for (low, high), (market_yes_p, ticker) in market_probs.items():
         if market_yes_p <= 0.01 or market_yes_p >= 0.99:
             continue
         
@@ -129,12 +176,10 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         edge_val = 0.0
         price = 0.0
         
-        # Buy No priority
         if diff_no > no_threshold - cold_boost:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        # Yes buys only if ENABLE_YES_BUYS = true and very strong edge
         elif ENABLE_YES_BUYS and model_yes_p - market_yes_p > base_threshold + 0.05:
             action = "Buy Yes"
             edge_val = model_yes_p - market_yes_p
@@ -150,12 +195,7 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
             
             potential_profit = contracts * (1 - price) if action == "Buy No" else contracts * (1 - price)
             
-            if high >= 200:
-                bin_str = f">={int(low)}°F"
-            elif low <= -100:
-                bin_str = f"<={int(high-1)}°F"
-            else:
-                bin_str = f"{int(low)}-{int(high-1)}°F"
+            bin_str = f">={int(low)}°F" if high >= 200 else f"<={int(high-1)}°F" if low <= -100 else f"{int(low)}-{int(high-1)}°F"
             
             edges.append({
                 'Bin': bin_str,
@@ -164,7 +204,8 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
                 'Price': round(price * 100),
                 'Risk': round(risk, 2),
                 'Contracts': contracts,
-                'PotentialProfit': round(potential_profit, 2)
+                'PotentialProfit': round(potential_profit, 2),
+                'Ticker': ticker
             })
     
     edges.sort(key=lambda x: x['Edge'], reverse=True)
@@ -197,6 +238,11 @@ def main():
             total_risk += edge['Risk']
             total_potential_profit += edge['PotentialProfit']
             trade_count += 1
+            
+            # Real auto-trading
+            if edge['Ticker']:
+                side = "no" if edge['Action'] == "Buy No" else "yes"
+                place_order(edge['Ticker'], side, edge['Contracts'], edge['Price'])
     
     if trade_count > 0:
         logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | Total potential profit: ${total_potential_profit:.2f} (if all win)")
