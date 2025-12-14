@@ -6,7 +6,6 @@ from scipy.stats import norm
 from typing import Dict, Tuple, List
 import sys
 
-# Console logging for Render
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -14,7 +13,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Verified NWS grid forecast URLs
 NWS_FORECAST_URLS = {
     'Miami': 'https://api.weather.gov/gridpoints/MFL/109,69/forecast',
     'NYC': 'https://api.weather.gov/gridpoints/OKX/33,35/forecast'
@@ -28,7 +26,7 @@ ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 BANKROLL = 50.0
-MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
+MAX_RISK_PER_TRADE_PCT = 0.04
 MAX_TRADES_PER_CITY = 2
 
 def fetch_nws_forecast(city: str) -> float:
@@ -88,13 +86,16 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
-def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float) -> List[dict]:
-    threshold = 0.055 / accuracy  # ~4.5% Miami, ~5.5% NYC
+def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float, city: str) -> List[dict]:
+    base_threshold = 0.055 / accuracy
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # 4% for NYC No, 4.5% Miami
+    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0  # Winter NYC cold tail boost
+    
     edges = []
     
     for (low, high), market_yes_p in market_probs.items():
         if market_yes_p <= 0.01 or market_yes_p >= 0.99:
-            continue  # Skip truly illiquid/near-certain
+            continue
         
         model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
         market_no_p = 1 - market_yes_p
@@ -107,13 +108,12 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         edge_val = 0.0
         price = 0.0
         
-        # Strong priority for Buy No on any overpriced tail
-        if diff_no > threshold:
+        # Aggressive Buy No on cold tails for NYC winter
+        if diff_no > no_threshold - cold_boost:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        # Yes only if VERY strong edge and undervalued
-        elif diff_yes > threshold + 0.04:  # Higher bar for Yes
+        elif diff_yes > base_threshold + 0.05:  # Very high bar for Yes
             action = "Buy Yes"
             edge_val = diff_yes
             price = market_yes_p
@@ -161,7 +161,7 @@ def main():
             logger.info(f"No market data available for {city} – skipping")
             continue
         
-        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city])
+        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city], city)
         
         for edge in edges:
             entry = (f"{city} High | {edge['Bin']} | {edge['Action']} @ {edge['Price']}¢ | "
