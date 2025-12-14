@@ -80,7 +80,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             elif 'or below' in subtitle_lower:
                 high_str = subtitle_lower.split('or below')[0].strip()
                 high = float(high_str) + 1
-                probs[(-100.0, high)] = yes_bid  # Wider low for cold tails
+                probs[(-100.0, high)] = yes_bid
         
         logger.info(f"Fetched {len(probs)} price bins for {series_ticker}")
         return probs
@@ -93,8 +93,8 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
     edges = []
     
     for (low, high), market_yes_p in market_probs.items():
-        if market_yes_p >= 0.99 or market_yes_p <= 0.01:
-            continue  # Skip truly illiquid/near-certain bins (protects from 0¢/99¢ issues)
+        if market_yes_p <= 0.01 or market_yes_p >= 0.99:
+            continue  # Skip truly illiquid/near-certain
         
         model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
         market_no_p = 1 - market_yes_p
@@ -107,18 +107,21 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         edge_val = 0.0
         price = 0.0
         
-        # Prioritize Buy No on any overpriced tail (cold or hot)
-        if abs(diff_no) > abs(diff_yes) and diff_no > threshold:
+        # Strong priority for Buy No on any overpriced tail
+        if diff_no > threshold:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        elif diff_yes > threshold + 0.02:  # Strong Yes on undervalued core/shoulder
+        # Yes only if VERY strong edge and undervalued
+        elif diff_yes > threshold + 0.04:  # Higher bar for Yes
             action = "Buy Yes"
             edge_val = diff_yes
             price = market_yes_p
         
         if action:
             denominator = price if action == "Buy Yes" else (1 - price)
+            if denominator == 0:
+                continue
             kelly = edge_val ** 2 / denominator
             risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
             contracts = max(1, int(risk / price)) if price > 0 else 0
