@@ -5,6 +5,7 @@ import numpy as np
 from scipy.stats import norm
 from typing import Dict, Tuple, List
 import sys
+import os
 
 # Console logging for Render
 logging.basicConfig(
@@ -30,6 +31,16 @@ PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
+
+# Triggers (off by default)
+ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
+ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
+KALSHI_TRADING_API_KEY = os.getenv('KALSHI_TRADING_API_KEY')  # For future auto-trading if needed
+
+if ENABLE_AUTO_TRADING:
+    logger.info("Auto-trading is ENABLED (placeholder — real trading not implemented yet)")
+else:
+    logger.info("Auto-trading is OFF — recommendations only")
 
 def fetch_nws_forecast(city: str) -> float:
     url = NWS_FORECAST_URLS[city]
@@ -60,14 +71,14 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event (format: 25DEC15 for Dec 15, 2025)
-        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()  # e.g., 25DEC15
+        # Filter to tomorrow's event (e.g., 25DEC15)
+        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
         logger.info(f"Found {len(tomorrow_markets)} markets for tomorrow ({tomorrow_str}) out of {len(markets)} open")
         if not tomorrow_markets:
-            logger.warning("No tomorrow's markets found — check if markets are open yet")
-            return {}
+            logger.warning("No tomorrow's markets found — falling back to all open")
+            tomorrow_markets = markets
         
         probs = {}
         for market in tomorrow_markets:
@@ -99,7 +110,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
 
 def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float, city: str) -> List[dict]:
     base_threshold = 0.055 / accuracy
-    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # NYC more aggressive on No
     cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
     
     edges = []
@@ -113,19 +124,20 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         model_no_p = 1 - model_yes_p
         
         diff_no = model_no_p - market_no_p
-        diff_yes = model_yes_p - market_yes_p
         
         action = None
         edge_val = 0.0
         price = 0.0
         
+        # Buy No priority
         if diff_no > no_threshold - cold_boost:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        elif diff_yes > base_threshold + 0.05:
+        # Yes buys only if ENABLE_YES_BUYS = true and very strong edge
+        elif ENABLE_YES_BUYS and model_yes_p - market_yes_p > base_threshold + 0.05:
             action = "Buy Yes"
-            edge_val = diff_yes
+            edge_val = model_yes_p - market_yes_p
             price = market_yes_p
         
         if action:
@@ -135,6 +147,8 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
             kelly = edge_val ** 2 / denominator
             risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
             contracts = max(1, int(risk / price)) if price > 0 else 0
+            
+            potential_profit = contracts * (1 - price) if action == "Buy No" else contracts * (1 - price)
             
             if high >= 200:
                 bin_str = f">={int(low)}°F"
@@ -149,7 +163,8 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
                 'Edge': round(edge_val * 100, 1),
                 'Price': round(price * 100),
                 'Risk': round(risk, 2),
-                'Contracts': contracts
+                'Contracts': contracts,
+                'PotentialProfit': round(potential_profit, 2)
             })
     
     edges.sort(key=lambda x: x['Edge'], reverse=True)
@@ -157,7 +172,9 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
 
 def main():
     logger.info("=== Kalshi High Temp Bot Started ===")
+    logger.info(f"ENABLE_YES_BUYS: {ENABLE_YES_BUYS} | ENABLE_AUTO_TRADING: {ENABLE_AUTO_TRADING}")
     total_risk = 0.0
+    total_potential_profit = 0.0
     trade_count = 0
     
     for city in CITIES:
@@ -178,10 +195,11 @@ def main():
                      f"Edge: {edge['Edge']}% | Risk: ${edge['Risk']} | Contracts: {edge['Contracts']}")
             logger.info(entry)
             total_risk += edge['Risk']
+            total_potential_profit += edge['PotentialProfit']
             trade_count += 1
     
     if trade_count > 0:
-        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f}")
+        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | Total potential profit: ${total_potential_profit:.2f} (if all win)")
     else:
         logger.info("No high-conviction edges found today – standing down.")
     
