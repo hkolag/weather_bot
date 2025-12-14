@@ -30,8 +30,8 @@ SERIES_TICKERS = {'Miami': 'KXHIGHMIA', 'NYC': 'KXHIGHNY'}
 SIGMAS = {'Miami': 1.4, 'NYC': 1.6}
 ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 
-PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
-TRADING_KALSHI_BASE = 'https://trading-api.kalshi.com/trade-api/v2'
+PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'  # Public data
+TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'  # Updated trading endpoint
 
 BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
