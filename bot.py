@@ -6,6 +6,7 @@ from scipy.stats import norm
 from typing import Dict, Tuple, List
 import sys
 
+# Console logging for Render
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -13,6 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Verified NWS grid forecast URLs
 NWS_FORECAST_URLS = {
     'Miami': 'https://api.weather.gov/gridpoints/MFL/109,69/forecast',
     'NYC': 'https://api.weather.gov/gridpoints/OKX/33,35/forecast'
@@ -26,7 +28,7 @@ ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 BANKROLL = 50.0
-MAX_RISK_PER_TRADE_PCT = 0.04
+MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
 def fetch_nws_forecast(city: str) -> float:
@@ -58,6 +60,14 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
+        # Log market titles to confirm which day's markets are being used
+        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%b %d").lower()
+        logger.info(f"Found {len(markets)} open markets for {series_ticker}:")
+        for m in markets:
+            title = m.get('title', '').lower()
+            event_ticker = m.get('event_ticker', '')
+            logger.info(f" - {event_ticker}: {title}")
+        
         probs = {}
         for market in markets:
             subtitle = market.get('subtitle', '').replace('°F', '').replace('°', '').strip()
@@ -80,7 +90,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
                 high = float(high_str) + 1
                 probs[(-100.0, high)] = yes_bid
         
-        logger.info(f"Fetched {len(probs)} price bins for {series_ticker}")
+        logger.info(f"Parsed {len(probs)} price bins from open markets")
         return probs
     except Exception as e:
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
@@ -88,8 +98,8 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict[Tuple[float, float], float]
 
 def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float], float], accuracy: float, city: str) -> List[dict]:
     base_threshold = 0.055 / accuracy
-    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # 4% for NYC No, 4.5% Miami
-    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0  # Winter NYC cold tail boost
+    no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold  # 4% for NYC No
+    cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0  # Winter cold tail boost
     
     edges = []
     
@@ -108,12 +118,11 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict[Tuple[float, float
         edge_val = 0.0
         price = 0.0
         
-        # Aggressive Buy No on cold tails for NYC winter
         if diff_no > no_threshold - cold_boost:
             action = "Buy No"
             edge_val = diff_no
             price = market_no_p
-        elif diff_yes > base_threshold + 0.05:  # Very high bar for Yes
+        elif diff_yes > base_threshold + 0.05:
             action = "Buy Yes"
             edge_val = diff_yes
             price = market_yes_p
