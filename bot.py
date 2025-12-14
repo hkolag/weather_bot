@@ -117,18 +117,32 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
-def sign_payload(timestamp: str) -> str:
-    private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/portfolio/orders"
-    signature = private_key.sign(
-        message.encode(),
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH
-        ),
-        hashes.SHA256()
-    )
-    return base64.b64encode(signature).decode()
+def sign_payload(timestamp: str, method: str, path: str, body: str = "") -> str:
+    """Generate signature for Kalshi API authentication"""
+    try:
+        # Load private key from PEM format
+        private_key = serialization.load_pem_private_key(
+            KALSHI_PRIVATE_KEY_PEM.encode('utf-8'), 
+            password=None
+        )
+        
+        # Kalshi signature format: timestamp + method + path + body
+        message = f"{timestamp}{method}{path}{body}"
+        
+        # Sign the message
+        signature = private_key.sign(
+            message.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        
+        return base64.b64encode(signature).decode('utf-8')
+    except Exception as e:
+        logger.error(f"Signature generation failed: {e}")
+        raise
 
 def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     if not ENABLE_AUTO_TRADING:
@@ -136,6 +150,8 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
         return
     
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    
+    # Build the order payload
     payload = {
         "ticker": ticker,
         "action": "buy",
@@ -144,23 +160,41 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
         "type": "limit",
         "client_order_id": f"bot-{timestamp}",
     }
+    
     if side == "yes":
         payload["yes_price"] = price_cents
     else:
         payload["no_price"] = price_cents
     
-    signature = sign_payload(timestamp)
+    # Convert payload to JSON string for signature and request
+    body = json.dumps(payload)
     
+    # API path (without base URL)
+    path = "/trade-api/v2/portfolio/orders"
+    method = "POST"
+    
+    # Generate signature
+    try:
+        signature = sign_payload(timestamp, method, path, body)
+    except Exception as e:
+        logger.error(f"Failed to sign request: {e}")
+        return
+    
+    # Build headers
     headers = {
         "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
         "KALSHI-ACCESS-SIGNATURE": signature,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
         "Content-Type": "application/json"
     }
+    
+    # Full URL
     url = f"{TRADING_KALSHI_BASE}/portfolio/orders"
+    
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
+        resp = requests.post(url, data=body, headers=headers, timeout=10)
+        
+        if resp.status_code in [200, 201]:
             order = resp.json().get('order', {})
             logger.info(f"SUCCESS: Placed {contracts} {side} on {ticker} @ {price_cents}¢ | Order ID: {order.get('order_id')}")
         else:
