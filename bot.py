@@ -7,6 +7,7 @@ from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
+import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -33,9 +34,10 @@ ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-BANKROLL = 100
-MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
+BANKROLL = 50.0
+MAX_RISK_PER_TRADE_PCT = 0.04
 MAX_TRADES_PER_CITY = 2
+MIN_NO_PRICE_CENTS = 60  # Only trade No contracts priced 60 cents or higher
 
 # Triggers
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
@@ -83,7 +85,6 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Use Eastern Time for "tomorrow"
         eastern = ZoneInfo("America/New_York")
         now_eastern = datetime.now(eastern)
         tomorrow = (now_eastern + timedelta(days=1)).date()
@@ -125,7 +126,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
 
 def sign_payload(timestamp: str) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/trade-api/v2/portfolio/orders"
+    message = f"{timestamp}POST/portfolio/orders"
     signature = private_key.sign(
         message.encode(),
         padding.PSS(
@@ -139,6 +140,11 @@ def sign_payload(timestamp: str) -> str:
 def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     if not ENABLE_AUTO_TRADING:
         logger.info(f"AUTO-TRADING OFF — would place: {contracts} {side} on {ticker} @ {price_cents}¢")
+        return
+    
+    # NEW: Block any order under 60 cents
+    if price_cents < 60:
+        logger.warning(f"Blocked order under 60¢: {ticker} {side} @ {price_cents}¢ – not placing")
         return
     
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -187,8 +193,9 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
         if market_yes_p <= 0.01 or market_yes_p >= 0.99:
             continue
         
-        model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
         market_no_p = 1 - market_yes_p
+        
+        model_yes_p = norm.cdf(high - 0.5, mu, sigma) - norm.cdf(low - 0.5, mu, sigma)
         model_no_p = 1 - model_yes_p
         
         diff_no = model_no_p - market_no_p
