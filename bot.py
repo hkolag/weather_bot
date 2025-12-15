@@ -1,13 +1,12 @@
 import logging
 import requests
-from datetime import datetime, timedelta, timezone  # <-- timezone added here
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
 from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
-import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -38,7 +37,7 @@ BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
-# Triggers
+# Triggers (set in Render Environment Variables)
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
 ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
 KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
@@ -175,7 +174,7 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     except Exception as e:
         logger.error(f"Order exception: {e}")
 
-def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str) -> List[dict]:
+def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str) -> Smoothie List[dict]:
     base_threshold = 0.055 / accuracy
     no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
     cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
