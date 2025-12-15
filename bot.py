@@ -1,6 +1,7 @@
 import logging
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import numpy as np
 from scipy.stats import norm
 from typing import Dict, List
@@ -37,7 +38,7 @@ BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
-# Triggers
+# Triggers (set in Render Environment Variables)
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
 ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
 KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
@@ -58,7 +59,9 @@ def fetch_nws_forecast(city: str) -> float:
     try:
         resp = requests.get(url, headers=headers, timeout=15).json()
         periods = resp['properties']['periods']
-        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date()
+        eastern = ZoneInfo("America/New_York")
+        now_eastern = datetime.now(eastern)
+        tomorrow = (now_eastern + timedelta(days=1)).date()
         for period in periods:
             start_str = period['startTime'].replace('Z', '+00:00')
             start = datetime.fromisoformat(start_str)
@@ -81,8 +84,12 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Filter to tomorrow's event (25DEC15 format)
-        tomorrow_str = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%y%b%d").upper()
+        # Use Eastern Time for "tomorrow"
+        eastern = ZoneInfo("America/New_York")
+        now_eastern = datetime.now(eastern)
+        tomorrow = (now_eastern + timedelta(days=1)).date()
+        tomorrow_str = tomorrow.strftime("%y%b%d").upper()
+        
         tomorrow_markets = [m for m in markets if tomorrow_str in m.get('event_ticker', '')]
         
         logger.info(f"Found {len(tomorrow_markets)} markets for tomorrow ({tomorrow_str}) out of {len(markets)} open")
