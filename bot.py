@@ -1,13 +1,12 @@
 import logging
 import requests
-from datetime import datetime, timedelta, timezone  # <-- timezone added here
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import numpy as np
 from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
-import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -126,7 +125,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
 
 def sign_payload(timestamp: str) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/portfolio/orders"
+    message = f"{timestamp}POST/trade-api/v2/portfolio/orders"
     signature = private_key.sign(
         message.encode(),
         padding.PSS(
