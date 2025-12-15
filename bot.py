@@ -166,7 +166,7 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     url = f"{TRADING_KALSHI_BASE}/portfolio/orders"
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
-        if resp.status_code == 200:
+        if resp.status_code in [200, 201]:
             order = resp.json().get('order', {})
             logger.info(f"SUCCESS: Placed {contracts} {side} on {ticker} @ {price_cents}¢ | Order ID: {order.get('order_id')}")
         else:
