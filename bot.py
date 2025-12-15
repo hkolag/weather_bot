@@ -7,6 +7,7 @@ from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
+import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -33,8 +34,10 @@ ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
+# Starting bankroll (can be adjusted)
 BANKROLL = 50.0
-MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
+current_bankroll = BANKROLL  # Dynamic tracking
+MAX_RISK_PER_TRADE_PCT = 0.04  # Safety cap: 4% of current bankroll
 MAX_TRADES_PER_CITY = 2
 
 # Triggers
@@ -125,7 +128,7 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
 
 def sign_payload(timestamp: str) -> str:
     private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/trade-api/v2/portfolio/orders"
+    message = f"{timestamp}POST/portfolio/orders"
     signature = private_key.sign(
         message.encode(),
         padding.PSS(
@@ -168,7 +171,10 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
         resp = requests.post(url, json=payload, headers=headers, timeout=10)
         if resp.status_code in [200, 201]:
             order = resp.json().get('order', {})
-            logger.info(f"SUCCESS: Placed {contracts} {side} on {ticker} @ {price_cents}¢ | Order ID: {order.get('order_id')}")
+            cost = contracts * (price_cents / 100.0)
+            global current_bankroll
+            current_bankroll -= cost
+            logger.info(f"SUCCESS: Placed {contracts} {side} on {ticker} @ {price_cents}¢ | Cost: ${cost:.2f} | Bankroll: ${current_bankroll:.2f} | Order ID: {order.get('order_id')}")
         else:
             logger.error(f"Order failed: {resp.status_code} {resp.text}")
     except Exception as e:
@@ -207,11 +213,12 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
             price = market_yes_p
         
         if action:
-            denominator = price if action == "Buy Yes" else (1 - price)
+            # Full Kelly for No trades: f = edge / (1 - price)
+            denominator = (1 - price) if action == "Buy No" else price
             if denominator == 0:
                 continue
-            kelly = edge_val ** 2 / denominator
-            risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
+            kelly_fraction = edge_val / denominator
+            risk = min(kelly_fraction * current_bankroll, current_bankroll * MAX_RISK_PER_TRADE_PCT)
             contracts = max(1, int(risk / price)) if price > 0 else 0
             
             potential_profit = contracts * (1 - price) if action == "Buy No" else contracts * (1 - price)
@@ -233,8 +240,11 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
     return edges[:MAX_TRADES_PER_CITY]
 
 def main():
+    global current_bankroll
+    current_bankroll = BANKROLL  # Reset daily or persist if you add storage
     logger.info("=== Kalshi High Temp Bot Started ===")
     logger.info(f"ENABLE_YES_BUYS: {ENABLE_YES_BUYS} | ENABLE_AUTO_TRADING: {ENABLE_AUTO_TRADING}")
+    logger.info(f"Starting bankroll: ${current_bankroll:.2f}")
     total_risk = 0.0
     total_potential_profit = 0.0
     trade_count = 0
@@ -267,6 +277,7 @@ def main():
     
     if trade_count > 0:
         logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | Total potential profit: ${total_potential_profit:.2f} (if all win)")
+        logger.info(f"Ending bankroll: ${current_bankroll:.2f}")
     else:
         logger.info("No high-conviction edges found today – standing down.")
     
