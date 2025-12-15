@@ -1,6 +1,6 @@
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # <-- timezone added here
 from zoneinfo import ZoneInfo
 import numpy as np
 from scipy.stats import norm
@@ -38,7 +38,7 @@ BANKROLL = 50.0
 MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
 MAX_TRADES_PER_CITY = 2
 
-# Triggers (set in Render Environment Variables)
+# Triggers
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
 ENABLE_AUTO_TRADING = os.getenv('ENABLE_AUTO_TRADING', 'false').lower() == 'true'
 KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
