@@ -35,7 +35,7 @@ PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
 BANKROLL = 100
-MAX_RISK_PER_TRADE_PCT = 0.04  # $2 max risk
+MAX_RISK_PER_TRADE_PCT = 0.04
 MAX_TRADES_PER_CITY = 2
 
 # Minimum No price to trade (60 cents = 0.60)
