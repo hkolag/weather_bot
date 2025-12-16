@@ -128,13 +128,19 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
         return {}
 
 def sign_payload(timestamp: str) -> str:
-    private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/portfolio/orders"
+    private_key = serialization.load_pem_private_key(
+        KALSHI_PRIVATE_KEY_PEM.encode(), 
+        password=None
+    )
+    # Correct full path including /trade-api/v2
+    path = "/trade-api/v2/portfolio/orders"
+    message = f"{timestamp}POST{path}".encode('utf-8')
+    
     signature = private_key.sign(
-        message.encode(),
+        message,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH
+            salt_length=padding.PSS.DIGEST_LENGTH  # Match Kalshi docs exactly
         ),
         hashes.SHA256()
     )
