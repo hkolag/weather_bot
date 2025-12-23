@@ -7,7 +7,6 @@ from scipy.stats import norm
 from typing import Dict, List
 import sys
 import os
-import json
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -34,10 +33,10 @@ ACCURACIES = {'Miami': 0.98, 'NYC': 0.96}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-MAX_RISK_PER_TRADE_PCT = 0.05  # 4% of bankroll max risk per trade
+MAX_RISK_PER_TRADE_PCT = 0.04  # 4% of bankroll max risk per trade
 MAX_TRADES_PER_CITY = 4
 
-# Minimum No price to trade (60 cents = 0.60)
+# Minimum No price to trade (70 cents = 0.70)
 MIN_NO_PRICE = 0.70
 
 # Triggers
@@ -129,26 +128,29 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
 
 
 def fetch_kalshi_balance() -> float:
-    """Fetch current settled cash balance from Kalshi and return a conservative usable bankroll."""
+    """Fetch current settled cash balance from Kalshi using correct signing format."""
     if not ENABLE_AUTO_TRADING:
-        logger.info("Auto-trading disabled — using fallback bankroll of $50")
-        return 50.0
+        logger.info("Auto-trading disabled — using fallback bankroll")
+        return 160.0
 
     if not KALSHI_API_KEY_ID or not KALSHI_PRIVATE_KEY_PEM:
         logger.warning("Missing credentials — falling back to fixed bankroll")
-        return 50.0
+        return 160.0
 
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    method = "GET"
+    path = "/trade-api/v2/portfolio/balance"
+    message = f"{timestamp}{method}{path}".encode('utf-8')
+
     try:
         private_key = serialization.load_pem_private_key(
             KALSHI_PRIVATE_KEY_PEM.encode(), password=None
         )
-        message = f"{timestamp}GET/portfolio/balance"
         signature = private_key.sign(
-            message.encode(),
+            message,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
+                salt_length=padding.PSS.DIGEST_LENGTH  # Matches Kalshi docs exactly
             ),
             hashes.SHA256()
         )
@@ -167,27 +169,32 @@ def fetch_kalshi_balance() -> float:
             balance_data = resp.json()
             settled_cash_cents = balance_data.get('balance', 0)
             settled_cash = settled_cash_cents / 100.0
-            # Use 95% as a safety buffer for fees/pending orders
-            usable_bankroll = settled_cash * 0.95
+            usable_bankroll = settled_cash * 0.95  # 95% safety buffer
             logger.info(f"Fetched Kalshi balance: ${settled_cash:.2f} → Using ${usable_bankroll:.2f} as bankroll")
-            return max(usable_bankroll, 10.0)  # minimum $10 to avoid tiny trades
+            return max(usable_bankroll, 20.0)  # Minimum $20
         else:
             logger.error(f"Balance fetch failed: {resp.status_code} {resp.text}")
     except Exception as e:
         logger.error(f"Exception fetching balance: {e}")
 
-    logger.warning("Balance fetch failed — falling back to fixed bankroll of $50")
-    return 50.0
+    logger.warning("Balance fetch failed — falling back to fixed bankroll")
+    return 160.0
 
 
 def sign_payload(timestamp: str) -> str:
-    private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
-    message = f"{timestamp}POST/portfolio/orders"
+    private_key = serialization.load_pem_private_key(
+        KALSHI_PRIVATE_KEY_PEM.encode(),
+        password=None
+    )
+    method = "POST"
+    path = "/trade-api/v2/portfolio/orders"
+    message = f"{timestamp}{method}{path}".encode('utf-8')
+    
     signature = private_key.sign(
-        message.encode(),
+        message,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH
+            salt_length=padding.PSS.DIGEST_LENGTH
         ),
         hashes.SHA256()
     )
@@ -248,7 +255,6 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
         
         market_no_p = 1 - market_yes_p
         
-        # Skip if No price < 60¢
         if market_no_p < MIN_NO_PRICE:
             continue
         
@@ -301,7 +307,7 @@ def main():
     logger.info("=== Kalshi High Temp Bot Started ===")
     logger.info(f"ENABLE_YES_BUYS: {ENABLE_YES_BUYS} | ENABLE_AUTO_TRADING: {ENABLE_AUTO_TRADING}")
 
-    # Fetch dynamic real-time bankroll
+    # Fetch dynamic bankroll
     bankroll = fetch_kalshi_balance()
     logger.info(f"Effective bankroll for this run: ${bankroll:.2f}")
 
