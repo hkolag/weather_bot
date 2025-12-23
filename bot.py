@@ -34,8 +34,7 @@ ACCURACIES = {'Miami': 0.98, 'NYC': 0.96}
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-BANKROLL = 160
-MAX_RISK_PER_TRADE_PCT = 0.04
+MAX_RISK_PER_TRADE_PCT = 0.05  # 4% of bankroll max risk per trade
 MAX_TRADES_PER_CITY = 4
 
 # Minimum No price to trade (60 cents = 0.60)
@@ -55,6 +54,7 @@ if ENABLE_AUTO_TRADING:
         logger.info("Auto-trading is ENABLED — real orders will be placed")
 else:
     logger.info("Auto-trading is OFF — recommendations only")
+
 
 def fetch_nws_forecast(city: str) -> float:
     url = NWS_FORECAST_URLS[city]
@@ -78,6 +78,7 @@ def fetch_nws_forecast(city: str) -> float:
         logger.error(f"NWS error for {city}: {e}")
         return 76.0 if city == 'Miami' else 32.0
 
+
 def fetch_kalshi_markets(series_ticker: str) -> Dict:
     url = f"{PUBLIC_KALSHI_BASE}/markets?series_ticker={series_ticker}&status=open&limit=100"
     try:
@@ -87,7 +88,6 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
             logger.warning(f"No open markets found for {series_ticker}")
             return {}
         
-        # Use Eastern Time for "tomorrow"
         eastern = ZoneInfo("America/New_York")
         now_eastern = datetime.now(eastern)
         tomorrow = (now_eastern + timedelta(days=1)).date()
@@ -127,24 +127,72 @@ def fetch_kalshi_markets(series_ticker: str) -> Dict:
         logger.error(f"Kalshi fetch error for {series_ticker}: {e}")
         return {}
 
+
+def fetch_kalshi_balance() -> float:
+    """Fetch current settled cash balance from Kalshi and return a conservative usable bankroll."""
+    if not ENABLE_AUTO_TRADING:
+        logger.info("Auto-trading disabled — using fallback bankroll of $50")
+        return 50.0
+
+    if not KALSHI_API_KEY_ID or not KALSHI_PRIVATE_KEY_PEM:
+        logger.warning("Missing credentials — falling back to fixed bankroll")
+        return 50.0
+
+    timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
+    try:
+        private_key = serialization.load_pem_private_key(
+            KALSHI_PRIVATE_KEY_PEM.encode(), password=None
+        )
+        message = f"{timestamp}GET/portfolio/balance"
+        signature = private_key.sign(
+            message.encode(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        signature_b64 = base64.b64encode(signature).decode()
+
+        headers = {
+            "KALSHI-ACCESS-KEY": KALSHI_API_KEY_ID,
+            "KALSHI-ACCESS-SIGNATURE": signature_b64,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp,
+        }
+
+        url = f"{TRADING_KALSHI_BASE}/portfolio/balance"
+        resp = requests.get(url, headers=headers, timeout=10)
+        
+        if resp.status_code == 200:
+            balance_data = resp.json()
+            settled_cash_cents = balance_data.get('balance', 0)
+            settled_cash = settled_cash_cents / 100.0
+            # Use 95% as a safety buffer for fees/pending orders
+            usable_bankroll = settled_cash * 0.95
+            logger.info(f"Fetched Kalshi balance: ${settled_cash:.2f} → Using ${usable_bankroll:.2f} as bankroll")
+            return max(usable_bankroll, 10.0)  # minimum $10 to avoid tiny trades
+        else:
+            logger.error(f"Balance fetch failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        logger.error(f"Exception fetching balance: {e}")
+
+    logger.warning("Balance fetch failed — falling back to fixed bankroll of $50")
+    return 50.0
+
+
 def sign_payload(timestamp: str) -> str:
-    private_key = serialization.load_pem_private_key(
-        KALSHI_PRIVATE_KEY_PEM.encode(), 
-        password=None
-    )
-    # Correct full path including /trade-api/v2
-    path = "/trade-api/v2/portfolio/orders"
-    message = f"{timestamp}POST{path}".encode('utf-8')
-    
+    private_key = serialization.load_pem_private_key(KALSHI_PRIVATE_KEY_PEM.encode(), password=None)
+    message = f"{timestamp}POST/portfolio/orders"
     signature = private_key.sign(
-        message,
+        message.encode(),
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.DIGEST_LENGTH  # Match Kalshi docs exactly
+            salt_length=padding.PSS.MAX_LENGTH
         ),
         hashes.SHA256()
     )
     return base64.b64encode(signature).decode()
+
 
 def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     if not ENABLE_AUTO_TRADING:
@@ -184,7 +232,8 @@ def place_order(ticker: str, side: str, contracts: int, price_cents: int):
     except Exception as e:
         logger.error(f"Order exception: {e}")
 
-def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str) -> List[dict]:
+
+def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, city: str, bankroll: float) -> List[dict]:
     base_threshold = 0.055 / accuracy
     no_threshold = base_threshold - 0.015 if city == 'NYC' else base_threshold
     cold_boost = 0.02 if city == 'NYC' and mu < 40 else 0
@@ -199,7 +248,7 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
         
         market_no_p = 1 - market_yes_p
         
-        # NEW: Skip if No price < 60¢
+        # Skip if No price < 60¢
         if market_no_p < MIN_NO_PRICE:
             continue
         
@@ -226,7 +275,7 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
             if denominator == 0:
                 continue
             kelly = edge_val ** 2 / denominator
-            risk = min(kelly * BANKROLL, BANKROLL * MAX_RISK_PER_TRADE_PCT)
+            risk = min(kelly * bankroll, bankroll * MAX_RISK_PER_TRADE_PCT)
             contracts = max(1, int(risk / price)) if price > 0 else 0
             
             potential_profit = contracts * (1 - price) if action == "Buy No" else contracts * (1 - price)
@@ -247,9 +296,15 @@ def compute_edges(mu: float, sigma: float, market_probs: Dict, accuracy: float, 
     edges.sort(key=lambda x: x['Edge'], reverse=True)
     return edges[:MAX_TRADES_PER_CITY]
 
+
 def main():
     logger.info("=== Kalshi High Temp Bot Started ===")
     logger.info(f"ENABLE_YES_BUYS: {ENABLE_YES_BUYS} | ENABLE_AUTO_TRADING: {ENABLE_AUTO_TRADING}")
+
+    # Fetch dynamic real-time bankroll
+    bankroll = fetch_kalshi_balance()
+    logger.info(f"Effective bankroll for this run: ${bankroll:.2f}")
+
     total_risk = 0.0
     total_potential_profit = 0.0
     trade_count = 0
@@ -265,7 +320,7 @@ def main():
             logger.info(f"No market data available for {city} – skipping")
             continue
         
-        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city], city)
+        edges = compute_edges(mu, sigma, market_probs, ACCURACIES[city], city, bankroll=bankroll)
         
         for edge in edges:
             entry = (f"{city} High | {edge['Bin']} | {edge['Action']} @ {edge['Price']}¢ | "
@@ -275,17 +330,18 @@ def main():
             total_potential_profit += edge['PotentialProfit']
             trade_count += 1
             
-            # Real auto-trading
             if edge['Ticker']:
                 side = "no" if edge['Action'] == "Buy No" else "yes"
                 place_order(edge['Ticker'], side, edge['Contracts'], edge['Price'])
     
     if trade_count > 0:
-        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | Total potential profit: ${total_potential_profit:.2f} (if all win)")
+        logger.info(f"Recommended {trade_count} trades | Total risked: ${total_risk:.2f} | "
+                    f"Total potential profit: ${total_potential_profit:.2f} (if all win)")
     else:
         logger.info("No high-conviction edges found today – standing down.")
     
     logger.info("=== Bot Run Ended ===\n")
+
 
 if __name__ == "__main__":
     main()
