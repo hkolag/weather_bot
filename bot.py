@@ -60,7 +60,7 @@ def fetch_nws_forecast(city: str) -> float:
     url = NWS_FORECAST_URLS[city]
     headers = {'User-Agent': 'KalshiWeatherBot/1.0 (contact@example.com)'}
     try:
-        resp = requests.get(url, headers=headers, timeout=15).json()
+        resp = requests.get(url, headers=headers, timeout=30).json()
         periods = resp['properties']['periods']
         eastern = ZoneInfo("America/New_York")
         now_eastern = datetime.now(eastern)
@@ -81,7 +81,7 @@ def fetch_nws_forecast(city: str) -> float:
 def fetch_kalshi_markets(series_ticker: str) -> Dict:
     url = f"{PUBLIC_KALSHI_BASE}/markets?series_ticker={series_ticker}&status=open&limit=100"
     try:
-        resp = requests.get(url, timeout=15).json()
+        resp = requests.get(url, timeout=30).json()
         markets = resp.get('markets', [])
         if not markets:
             logger.warning(f"No open markets found for {series_ticker}")
