@@ -28,18 +28,18 @@ NWS_FORECAST_URLS = {
 
 CITIES = ['Miami', 'NYC']
 SERIES_TICKERS = {'Miami': 'KXHIGHMIA', 'NYC': 'KXHIGHNY'}
-SIGMAS = {'Miami': 1.4, 'NYC': 1.6}
-ACCURACIES = {'Miami': 0.976, 'NYC': 0.952}
+SIGMAS = {'Miami': 1.5, 'NYC': 1.8}
+ACCURACIES = {'Miami': 0.98, 'NYC': 0.96}
 
 PUBLIC_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 TRADING_KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2'
 
-BANKROLL = 100
+BANKROLL = 160
 MAX_RISK_PER_TRADE_PCT = 0.04
-MAX_TRADES_PER_CITY = 2
+MAX_TRADES_PER_CITY = 4
 
 # Minimum No price to trade (60 cents = 0.60)
-MIN_NO_PRICE = 0.60
+MIN_NO_PRICE = 0.70
 
 # Triggers
 ENABLE_YES_BUYS = os.getenv('ENABLE_YES_BUYS', 'false').lower() == 'true'
